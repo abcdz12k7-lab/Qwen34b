@@ -1,7 +1,8 @@
 # qwen-render-gateway
 
 Small authenticated gateway that exposes a public Render URL in front of a private
-Daytona-hosted Ollama instance.
+Daytona-hosted Ollama instance. It provides an OpenAI-compatible `/v1` API, so
+standard OpenAI SDKs and tools can use it by changing only the base URL.
 
 ```
 Your application
@@ -25,32 +26,87 @@ preview token stay on the server side.
 
 ## Endpoints
 
-| Method | Path        | Auth                    | Description                    |
-| ------ | ----------- | ----------------------- | ------------------------------ |
-| GET    | `/health`   | none                    | Liveness check                 |
-| POST   | `/api/chat` | `Bearer APP_API_KEY`    | Forwards a chat request        |
+| Method | Path                    | Auth                 | Description                    |
+| ------ | ----------------------- | -------------------- | ------------------------------ |
+| GET    | `/health`               | none                 | Liveness check                 |
+| GET    | `/`                     | none                 | Service info                   |
+| GET    | `/v1`                   | none                 | API info                       |
+| GET    | `/v1/models`            | `Bearer APP_API_KEY` | List models                    |
+| GET    | `/v1/models/{id}`       | `Bearer APP_API_KEY` | Get one model                  |
+| POST   | `/v1/chat/completions`  | `Bearer APP_API_KEY` | OpenAI chat completions        |
+| POST   | `/v1/completions`       | `Bearer APP_API_KEY` | OpenAI text completions        |
+| POST   | `/api/chat`             | `Bearer APP_API_KEY` | Legacy raw passthrough         |
 
-`POST /api/chat` accepts:
+## OpenAI-compatible API
 
-```json
-{
-  "messages": [
-    { "role": "user", "content": "Hello" }
-  ]
-}
+- Base URL: `https://YOUR-SERVICE.onrender.com/v1`
+- Model: `qwen3-4b-local` (always used; the request `model` value is ignored)
+- API key: your `APP_API_KEY`
+
+Only one model is served, `n` must be 1, and tool calling, images, and audio are
+not supported. The upstream response is generated without streaming; if the
+caller sets `"stream": true`, the gateway converts that response into SSE chunks
+and ends with `data: [DONE]`.
+
+### curl
+
+```bash
+curl -s https://YOUR-SERVICE.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer $APP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-4b-local",
+    "messages": [{ "role": "user", "content": "Reply exactly: RENDER OK" }]
+  }'
 ```
 
-The gateway always forces `model: "qwen3-4b-local"`, `stream: false`, and
-`think: false`. Only `messages` is taken from the request body.
+### Python (openai)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://YOUR-SERVICE.onrender.com/v1",
+    api_key=APP_API_KEY,
+)
+
+reply = client.chat.completions.create(
+    model="qwen3-4b-local",
+    messages=[{"role": "user", "content": "Reply exactly: RENDER OK"}],
+)
+print(reply.choices[0].message.content)
+```
+
+### JavaScript (openai)
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://YOUR-SERVICE.onrender.com/v1",
+  apiKey: process.env.APP_API_KEY,
+});
+
+const reply = await client.chat.completions.create({
+  model: "qwen3-4b-local",
+  messages: [{ role: "user", content: "Reply exactly: RENDER OK" }],
+});
+
+console.log(reply.choices[0].message.content);
+```
+
+The gateway always sends `model: "qwen3-4b-local"`, `stream: false`, and
+`think: false` to the Daytona proxy, so the upstream response is always complete.
 
 Status codes:
 
-- `200` upstream response
-- `400` invalid JSON body
+- `200` success
+- `400` invalid JSON, messages, prompt, or unsupported parameter
 - `401` missing or wrong `APP_API_KEY`
-- `404` unknown route
+- `404` unknown route or model
 - `413` body larger than 1 MB
-- `502` Daytona unreachable or upstream response failed
+- `429` upstream rate limit
+- `502` Daytona unreachable, upstream error, or invalid upstream response
 
 ## Environment variables
 
@@ -87,22 +143,43 @@ commit `.env`.
 
 ```bash
 curl -s https://YOUR-SERVICE.onrender.com/health
+curl -s https://YOUR-SERVICE.onrender.com/v1
 
+curl -s https://YOUR-SERVICE.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer $APP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-4b-local","messages":[{"role":"user","content":"Reply exactly: RENDER OK"}]}'
+```
+
+Expected OpenAI response:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "qwen3-4b-local",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "RENDER OK" },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 18, "completion_tokens": 3, "total_tokens": 21 }
+}
+```
+
+The legacy `/api/chat` endpoint still returns the raw Ollama-shaped response:
+
+```bash
 curl -s -X POST https://YOUR-SERVICE.onrender.com/api/chat \
   -H "Authorization: Bearer $APP_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Reply exactly: RENDER OK"}]}'
 ```
 
-Expected chat response (from Ollama):
-
-```json
-{
-  "model": "qwen3-4b-local",
-  "message": { "role": "assistant", "content": "RENDER OK" },
-  "done": true
-}
-```
+On Render's free tier the service sleeps when idle; the first request after a
+pause can take 30-60 seconds while the instance and the Daytona backend wake up.
 
 ## Security notes
 
