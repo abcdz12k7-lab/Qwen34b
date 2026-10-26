@@ -1,0 +1,13 @@
+{
+  "name": "qwen-render-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Authenticated Render gateway for a private Daytona-hosted Ollama proxy",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
